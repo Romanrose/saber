@@ -1,11 +1,11 @@
-name: Build unofficial snap
+name: Check unofficial snap is buildable
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/snap.yml
-      - snap/snapcraft.yaml
+  # push:
+  #   paths:
+  #     - .github/workflows/snap.yml
+  #     - snap/snapcraft.yaml
 
 jobs:
   build-snap:
