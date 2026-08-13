@@ -1,10 +1,31 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:http/http.dart' as http;
 import 'package:saber/data/pi_companion/pi_companion_client.dart';
 
 void expectCondition(bool condition, String message) {
   if (!condition) throw StateError(message);
+}
+
+class RecordingClient extends http.BaseClient {
+  RecordingClient() : _inner = http.Client();
+
+  final http.Client _inner;
+  final requests = <http.Request>[];
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    if (request is! http.Request) {
+      throw StateError('live smoke received an unexpected request type');
+    }
+    requests.add(request);
+    return _inner.send(request);
+  }
+
+  @override
+  void close() => _inner.close();
 }
 
 Future<SaberPiBridgeResult> seekFixture({
@@ -30,10 +51,12 @@ Future<SaberPiBridgeResult> seekFixture({
 }
 
 Future<void> main() async {
+  final recorder = RecordingClient();
   final bridge = SaberPiBridgeClient(
     baseUri: Uri.parse(
       Platform.environment['SABER_PI_BRIDGE_URL'] ?? 'http://127.0.0.1:4175',
     ),
+    client: recorder,
   );
   final ink = Uint8List.fromList([137, 80, 78, 71]);
 
@@ -49,6 +72,27 @@ Future<void> main() async {
           evidence.outcome?['path'] is List &&
           evidence.originalInkRetained,
       'live evidence response crossed the contract boundary',
+    );
+    final transcribeRequest = recorder.requests.first;
+    final transcribeBody =
+        jsonDecode(transcribeRequest.body) as Map<String, dynamic>;
+    expectCondition(
+      transcribeRequest.url.path.endsWith('/transcribe') &&
+          !transcribeRequest.headers.containsKey('authorization') &&
+          !transcribeBody.containsKey('confirmedText') &&
+          transcribeBody['image'] is Map &&
+          (transcribeBody['image'] as Map)['data'] ==
+              'data:image/png;base64,iVBORw==',
+      'live transcribe request crossed the client boundary',
+    );
+    final firstSeekRequest = recorder.requests.last;
+    final firstSeekBody =
+        jsonDecode(firstSeekRequest.body) as Map<String, dynamic>;
+    expectCondition(
+      firstSeekRequest.url.path.endsWith('/seek') &&
+          firstSeekBody['confirmedText'] == '李白写过《将进酒》吗？' &&
+          !firstSeekRequest.headers.containsKey('authorization'),
+      'live seek request crossed the confirmation boundary',
     );
 
     final ambiguous = await seekFixture(
@@ -89,6 +133,7 @@ Future<void> main() async {
     );
   } finally {
     bridge.close();
+    recorder.close();
   }
 
   stdout.writeln(
