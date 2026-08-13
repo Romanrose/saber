@@ -188,6 +188,7 @@ class SaberPiSession {
   final void Function()? onLocalAwakening;
   final void Function(SaberPiSessionState state)? onStateChanged;
   var _state = const SaberPiSessionState(phase: SaberPiPhase.rest);
+  var _turn = 0;
 
   SaberPiSessionState get state => _state;
 
@@ -197,6 +198,7 @@ class SaberPiSession {
     required SaberPiMode mode,
     required Future<Uint8List> Function() capturePng,
   }) async {
+    final turn = ++_turn;
     if (mode == SaberPiMode.quiet) {
       return _publish(
         SaberPiSessionState(
@@ -223,6 +225,7 @@ class SaberPiSession {
     Uint8List? png;
     try {
       png = await capturePng();
+      if (turn != _turn) return _state;
 
       final result = await bridge.transcribe(
         pageId: pageId,
@@ -230,6 +233,7 @@ class SaberPiSession {
         mode: mode,
         png: png,
       );
+      if (turn != _turn) return _state;
       if (result.status == 'ok' && result.transcription != null) {
         return _publish(
           SaberPiSessionState(
@@ -251,6 +255,7 @@ class SaberPiSession {
         ),
       );
     } on SaberPiBridgeException catch (error) {
+      if (turn != _turn) return _state;
       return _publish(
         SaberPiSessionState(
           phase: SaberPiPhase.ready,
@@ -261,6 +266,7 @@ class SaberPiSession {
         ),
       );
     } on Object catch (error) {
+      if (turn != _turn) return _state;
       return _publish(
         SaberPiSessionState(
           phase: SaberPiPhase.ready,
@@ -285,12 +291,14 @@ class SaberPiSession {
       throw const SaberPiBridgeException('confirmation_required');
     }
 
+    final turn = ++_turn;
     final result = await bridge.seek(
       pageId: current.pageId!,
       strokeSegmentId: current.strokeSegmentId!,
       png: current.ink!,
       confirmedText: confirmedText,
     );
+    if (turn != _turn) return _state;
     return _publish(
       SaberPiSessionState(
         phase: SaberPiPhase.ready,

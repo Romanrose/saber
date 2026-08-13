@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -231,6 +232,66 @@ Future<void> main() async {
   expectCondition(
     gapResult.outcome?['kind'] == 'gap' && gapResult.outcome?['gap'] is String,
     'evidence gap was not retained for the margin panel',
+  );
+
+  final firstTranscription = Completer<http.Response>();
+  final firstRequestStarted = Completer<void>();
+  final staleClient = MockClient((request) async {
+    final requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+    if (requestBody['strokeSegmentId'] == 'segment-stale') {
+      firstRequestStarted.complete();
+      return firstTranscription.future;
+    }
+    final body = envelope(
+      stage: 'transcription',
+      status: 'ok',
+      transcription: {'text': '第二段笔迹', 'candidates': <String>[]},
+    );
+    return http.Response.bytes(
+      utf8.encode(jsonEncode(body)),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+  });
+  final staleSession = SaberPiSession(
+    bridge: SaberPiBridgeClient(
+      baseUri: Uri.parse('http://127.0.0.1:4175'),
+      client: staleClient,
+    ),
+  );
+  final staleTurn = staleSession.onPenUp(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-stale',
+    mode: SaberPiMode.seek,
+    capturePng: () async => ink,
+  );
+  await firstRequestStarted.future;
+  await staleSession.onPenUp(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-current',
+    mode: SaberPiMode.seek,
+    capturePng: () async => ink,
+  );
+  expectCondition(
+    staleSession.state.transcription?.text == '第二段笔迹',
+    'current transcription was not published',
+  );
+  final staleBody = envelope(
+    stage: 'transcription',
+    status: 'ok',
+    transcription: {'text': '迟到的第一段笔迹', 'candidates': <String>[]},
+  );
+  firstTranscription.complete(
+    http.Response.bytes(
+      utf8.encode(jsonEncode(staleBody)),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    ),
+  );
+  await staleTurn;
+  expectCondition(
+    staleSession.state.transcription?.text == '第二段笔迹',
+    'stale transcription overwrote the current turn',
   );
 
   stdout.writeln(
