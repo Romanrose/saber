@@ -181,6 +181,7 @@ class EditorState extends State<Editor> {
       if (mounted) setState(() {});
     },
     onStateChanged: (state) {
+      _piError = state.error;
       if (state.transcription != null) {
         _piConfirmationController.text = state.transcription!.text;
       }
@@ -2158,6 +2159,7 @@ class EditorState extends State<Editor> {
     _watchServerTimer?.cancel();
     _lastSeenPointerCountTimer?.cancel();
     _piConfirmationController.dispose();
+    _piBridge.close();
 
     _removeKeybindings();
 

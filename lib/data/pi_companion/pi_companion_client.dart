@@ -81,13 +81,19 @@ class SaberPiBridgeClient {
     required this.baseUri,
     http.Client? client,
     this.timeout = const Duration(seconds: 8),
-  }) : _httpClient = client ?? http.Client();
+  }) : _httpClient = client ?? http.Client(),
+       _ownsHttpClient = client == null;
 
   static const _prefix = '/spike/saber-pi/v1';
 
   final Uri baseUri;
   final http.Client _httpClient;
+  final bool _ownsHttpClient;
   final Duration timeout;
+
+  void close() {
+    if (_ownsHttpClient) _httpClient.close();
+  }
 
   Uri _endpoint(String name) {
     final basePath = baseUri.path.endsWith('/')
@@ -159,6 +165,7 @@ class SaberPiSessionState {
     this.ink,
     this.transcription,
     this.result,
+    this.error,
   });
 
   final SaberPiPhase phase;
@@ -167,6 +174,7 @@ class SaberPiSessionState {
   final Uint8List? ink;
   final SaberPiTranscription? transcription;
   final SaberPiBridgeResult? result;
+  final String? error;
 }
 
 class SaberPiSession {
@@ -212,34 +220,57 @@ class SaberPiSession {
       onLocalAwakening?.call();
     }
 
-    final png = await capturePng();
+    Uint8List? png;
+    try {
+      png = await capturePng();
 
-    final result = await bridge.transcribe(
-      pageId: pageId,
-      strokeSegmentId: strokeSegmentId,
-      mode: mode,
-      png: png,
-    );
-    if (result.status == 'ok' && result.transcription != null) {
+      final result = await bridge.transcribe(
+        pageId: pageId,
+        strokeSegmentId: strokeSegmentId,
+        mode: mode,
+        png: png,
+      );
+      if (result.status == 'ok' && result.transcription != null) {
+        return _publish(
+          SaberPiSessionState(
+            phase: SaberPiPhase.awaitingConfirmation,
+            pageId: pageId,
+            strokeSegmentId: strokeSegmentId,
+            ink: png,
+            transcription: result.transcription,
+          ),
+        );
+      }
       return _publish(
         SaberPiSessionState(
-          phase: SaberPiPhase.awaitingConfirmation,
+          phase: SaberPiPhase.ready,
           pageId: pageId,
           strokeSegmentId: strokeSegmentId,
           ink: png,
-          transcription: result.transcription,
+          result: result,
+        ),
+      );
+    } on SaberPiBridgeException catch (error) {
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: pageId,
+          strokeSegmentId: strokeSegmentId,
+          ink: png,
+          error: error.message,
+        ),
+      );
+    } on Object catch (error) {
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: pageId,
+          strokeSegmentId: strokeSegmentId,
+          ink: png,
+          error: error.toString(),
         ),
       );
     }
-    return _publish(
-      SaberPiSessionState(
-        phase: SaberPiPhase.ready,
-        pageId: pageId,
-        strokeSegmentId: strokeSegmentId,
-        ink: png,
-        result: result,
-      ),
-    );
   }
 
   Future<SaberPiSessionState> confirm(String text) async {

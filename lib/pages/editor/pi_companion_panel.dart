@@ -22,6 +22,7 @@ class PiCompanionPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final outcomeKind = state.result?.outcome?['kind'];
+    final visibleError = error ?? state.error;
     return Card(
       margin: const EdgeInsets.all(12),
       elevation: 3,
@@ -100,10 +101,10 @@ class PiCompanionPanel extends StatelessWidget {
                   )
                 else if (state.phase == SaberPiPhase.ready)
                   const Text('等待下一段笔迹。'),
-                if (error != null) ...[
+                if (visibleError != null) ...[
                   const SizedBox(height: 6),
                   Text(
-                    '桥接不可用：$error',
+                    '桥接不可用：$visibleError',
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
                     ),

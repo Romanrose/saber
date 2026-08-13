@@ -132,6 +132,36 @@ Future<void> main() async {
     'quiet mode crossed the Pi transport boundary',
   );
 
+  var failedCaptures = 0;
+  final failedSession = SaberPiSession(
+    bridge: SaberPiBridgeClient(
+      baseUri: Uri.parse('http://127.0.0.1:4175'),
+      client: MockClient((request) async {
+        return http.Response.bytes(
+          utf8.encode('{"status":"vision_unavailable"}'),
+          503,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    ),
+  );
+  final failedState = await failedSession.onPenUp(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-failed',
+    mode: SaberPiMode.seek,
+    capturePng: () async {
+      failedCaptures++;
+      return ink;
+    },
+  );
+  expectCondition(
+    failedState.phase == SaberPiPhase.ready &&
+        failedState.error == 'vision_unavailable' &&
+        failedState.ink == ink &&
+        failedCaptures == 1,
+    'transcription failure left the session stuck or dropped ink',
+  );
+
   stdout.writeln(
     'Saber Dart companion client verified: local awakening, confirmation gate, ink retention, evidence, and quiet mode.',
   );
