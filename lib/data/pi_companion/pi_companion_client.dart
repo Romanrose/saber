@@ -153,6 +153,16 @@ class SaberPiBridgeClient {
         decoded['status'] as String? ?? 'bridge_rejected',
       );
     }
+    final expectedStage = endpoint == 'transcribe'
+        ? 'transcription'
+        : 'annotation';
+    if (decoded['schema'] != 'saber-pi-bridge-v1' ||
+        decoded['pageId'] != body['pageId'] ||
+        decoded['strokeSegmentId'] != body['strokeSegmentId'] ||
+        decoded['mode'] != body['mode'] ||
+        decoded['stage'] != expectedStage) {
+      throw const SaberPiBridgeException('invalid_bridge_identity');
+    }
     return SaberPiBridgeResult.fromJson(decoded);
   }
 }

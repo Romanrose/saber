@@ -14,6 +14,9 @@ void expectCondition(bool condition, String message) {
 Map<String, dynamic> envelope({
   required String stage,
   required String status,
+  String? pageId,
+  String? strokeSegmentId,
+  String? mode,
   Map<String, dynamic>? transcription,
   Map<String, dynamic>? outcome,
 }) {
@@ -23,6 +26,9 @@ Map<String, dynamic> envelope({
     'status': status,
     'originalInk': 'retained_by_saber',
   };
+  if (pageId != null) result['pageId'] = pageId;
+  if (strokeSegmentId != null) result['strokeSegmentId'] = strokeSegmentId;
+  if (mode != null) result['mode'] = mode;
   if (transcription != null) result['transcription'] = transcription;
   if (outcome != null) result['outcome'] = outcome;
   return result;
@@ -62,6 +68,9 @@ Future<SaberPiBridgeResult> runOutcomeCase({
     final body = envelope(
       stage: isSeek ? 'annotation' : 'transcription',
       status: 'ok',
+      pageId: requestBody['pageId'] as String,
+      strokeSegmentId: requestBody['strokeSegmentId'] as String,
+      mode: requestBody['mode'] as String,
       transcription: isSeek ? null : {'text': text, 'candidates': <String>[]},
       outcome: isSeek ? outcome : null,
     );
@@ -100,6 +109,9 @@ Future<void> main() async {
           ? envelope(
               stage: 'annotation',
               status: 'ok',
+              pageId: 'note-01-page-01',
+              strokeSegmentId: 'segment-01',
+              mode: 'seek',
               outcome: {
                 'kind': 'evidence',
                 'path': ['李白', '作者', '将进酒'],
@@ -108,6 +120,9 @@ Future<void> main() async {
           : envelope(
               stage: 'transcription',
               status: 'ok',
+              pageId: 'note-01-page-01',
+              strokeSegmentId: 'segment-01',
+              mode: 'seek',
               transcription: {'text': '李白写过《将进酒》吗？', 'candidates': <String>[]},
             ),
     );
@@ -222,6 +237,35 @@ Future<void> main() async {
     'transcription failure left the session stuck or dropped ink',
   );
 
+  final identityClient = MockClient((request) async {
+    final body = envelope(
+      stage: 'transcription',
+      status: 'ok',
+      pageId: 'other-page',
+      strokeSegmentId: 'segment-identity',
+      mode: 'seek',
+      transcription: {'text': '错误页', 'candidates': <String>[]},
+    );
+    return http.Response.bytes(utf8.encode(jsonEncode(body)), 200);
+  });
+  final identitySession = SaberPiSession(
+    bridge: SaberPiBridgeClient(
+      baseUri: Uri.parse('http://127.0.0.1:4175'),
+      client: identityClient,
+    ),
+  );
+  final identityState = await identitySession.onPenUp(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-identity',
+    mode: SaberPiMode.seek,
+    capturePng: () async => ink,
+  );
+  expectCondition(
+    identityState.error == 'invalid_bridge_identity' &&
+        identityState.ink == ink,
+    'response from another page crossed the identity boundary',
+  );
+
   final ambiguousResult = await runOutcomeCase(ink: ink, text: '李贺和长安有什么关联？');
   expectCondition(
     ambiguousResult.outcome?['kind'] == 'ambiguous' &&
@@ -245,6 +289,9 @@ Future<void> main() async {
     final body = envelope(
       stage: 'transcription',
       status: 'ok',
+      pageId: requestBody['pageId'] as String,
+      strokeSegmentId: requestBody['strokeSegmentId'] as String,
+      mode: requestBody['mode'] as String,
       transcription: {'text': '第二段笔迹', 'candidates': <String>[]},
     );
     return http.Response.bytes(
@@ -279,6 +326,9 @@ Future<void> main() async {
   final staleBody = envelope(
     stage: 'transcription',
     status: 'ok',
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-stale',
+    mode: 'seek',
     transcription: {'text': '迟到的第一段笔迹', 'candidates': <String>[]},
   );
   firstTranscription.complete(
