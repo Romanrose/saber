@@ -38,6 +38,7 @@ import 'package:saber/data/extensions/change_notifier_extensions.dart';
 import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/nextcloud/saber_syncer.dart';
+import 'package:saber/data/pi_companion/pi_companion_client.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
@@ -48,6 +49,7 @@ import 'package:saber/data/tools/pencil.dart';
 import 'package:saber/data/tools/select.dart';
 import 'package:saber/data/tools/shape_pen.dart';
 import 'package:saber/i18n/strings.g.dart';
+import 'package:saber/pages/editor/pi_companion_panel.dart';
 import 'package:saber/pages/home/whiteboard.dart';
 import 'package:sbn/change.dart';
 import 'package:super_clipboard/super_clipboard.dart';
@@ -169,6 +171,25 @@ class EditorState extends State<Editor> {
   Timer? _lastSeenPointerCountTimer;
 
   ValueNotifier<QuillStruct?> quillFocus = ValueNotifier(null);
+
+  late final _piBridge = SaberPiBridgeClient(
+    baseUri: Uri.parse('http://127.0.0.1:4175'),
+  );
+  late final _piSession = SaberPiSession(
+    bridge: _piBridge,
+    onLocalAwakening: () {
+      if (mounted) setState(() {});
+    },
+    onStateChanged: (state) {
+      if (state.transcription != null) {
+        _piConfirmationController.text = state.transcription!.text;
+      }
+      if (mounted) setState(() {});
+    },
+  );
+  final _piConfirmationController = TextEditingController();
+  var _piMode = SaberPiMode.seek;
+  String? _piError;
 
   /// The last non-Eraser [currentTool] value.
   late Tool _lastNonEraserTool = Pen.currentPen;
@@ -642,6 +663,8 @@ class EditorState extends State<Editor> {
   void onDrawEnd(ScaleEndDetails details) {
     final page = coreInfo.pages[dragPageIndex!];
     bool shouldSave = true;
+    int? piPageIndex;
+    String? piStrokeSegmentId;
     setState(() {
       if (currentTool is Pen) {
         final newStroke = (currentTool as Pen).onDragEnd();
@@ -656,6 +679,8 @@ class EditorState extends State<Editor> {
 
         createPage(newStroke.pageIndex);
         page.insertStroke(newStroke);
+        piPageIndex = dragPageIndex;
+        piStrokeSegmentId = 'stroke-${DateTime.now().microsecondsSinceEpoch}';
         history.recordChange(
           EditorHistoryItem(
             type: .draw,
@@ -719,6 +744,56 @@ class EditorState extends State<Editor> {
     });
 
     if (shouldSave) autosaveAfterDelay();
+    if (piPageIndex != null && piStrokeSegmentId != null) {
+      _startPiCompanionTurn(piPageIndex!, piStrokeSegmentId!);
+    }
+  }
+
+  void _startPiCompanionTurn(int pageIndex, String strokeSegmentId) {
+    _piError = null;
+    unawaited(() async {
+      try {
+        await _piSession.onPenUp(
+          pageId: 'page-$pageIndex',
+          strokeSegmentId: strokeSegmentId,
+          mode: _piMode,
+          capturePng: () async {
+            final image = await EditorExporter.screenshotPage(
+              coreInfo: coreInfo,
+              pageIndex: pageIndex,
+              rasterizeAllStrokes: true,
+              pixelRatio: 1,
+            );
+            try {
+              final data = await image.toByteData(format: .png);
+              if (data == null) {
+                throw const SaberPiBridgeException('png_capture_failed');
+              }
+              return data.buffer.asUint8List();
+            } finally {
+              image.dispose();
+            }
+          },
+        );
+      } on SaberPiBridgeException catch (error) {
+        if (mounted) setState(() => _piError = error.message);
+      } on Object catch (error) {
+        if (mounted) setState(() => _piError = error.toString());
+      }
+    }());
+  }
+
+  void _confirmPiTranscription() {
+    _piError = null;
+    unawaited(() async {
+      try {
+        await _piSession.confirm(_piConfirmationController.text);
+      } on SaberPiBridgeException catch (error) {
+        if (mounted) setState(() => _piError = error.message);
+      } on Object catch (error) {
+        if (mounted) setState(() => _piError = error.toString());
+      }
+    }());
   }
 
   void onInteractionEnd(ScaleEndDetails details) {
@@ -1586,6 +1661,22 @@ class EditorState extends State<Editor> {
     );
 
     final Widget body;
+    final canvasWithPiPanel = Stack(
+      children: [
+        Positioned.fill(child: canvas),
+        Align(
+          alignment: Alignment.centerRight,
+          child: PiCompanionPanel(
+            mode: _piMode,
+            state: _piSession.state,
+            confirmationController: _piConfirmationController,
+            error: _piError,
+            onModeChanged: (mode) => setState(() => _piMode = mode),
+            onConfirm: _confirmPiTranscription,
+          ),
+        ),
+      ],
+    );
     if (isToolbarVertical) {
       body = Row(
         textDirection: stows.editorToolbarAlignment.value == AxisDirection.left
@@ -1596,7 +1687,7 @@ class EditorState extends State<Editor> {
           Expanded(
             child: Column(
               children: [
-                Expanded(child: canvas),
+                Expanded(child: canvasWithPiPanel),
                 readonlyBanner,
               ],
             ),
@@ -1610,7 +1701,7 @@ class EditorState extends State<Editor> {
             ? VerticalDirection.up
             : VerticalDirection.down,
         children: [
-          Expanded(child: canvas),
+          Expanded(child: canvasWithPiPanel),
           toolbar,
           readonlyBanner,
         ],
@@ -2066,6 +2157,7 @@ class EditorState extends State<Editor> {
     _delayedSaveTimer?.cancel();
     _watchServerTimer?.cancel();
     _lastSeenPointerCountTimer?.cancel();
+    _piConfirmationController.dispose();
 
     _removeKeybindings();
 
