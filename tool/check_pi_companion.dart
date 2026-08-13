@@ -27,6 +27,65 @@ Map<String, dynamic> envelope({
   return result;
 }
 
+Future<SaberPiBridgeResult> runOutcomeCase({
+  required Uint8List ink,
+  required String text,
+}) async {
+  final client = MockClient((request) async {
+    final isSeek = request.url.path.endsWith('/seek');
+    final requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+    final confirmedText = requestBody['confirmedText'];
+    final Map<String, dynamic> outcome;
+    if (confirmedText == '李贺和长安有什么关联？') {
+      outcome = {
+        'kind': 'ambiguous',
+        'clarification': '这段文字可能指向两个实体。',
+        'candidates': ['李贺', '李白'],
+      };
+    } else if (confirmedText == '珊瑚与唐诗有什么关联？') {
+      outcome = {
+        'kind': 'gap',
+        'gap': '当前图谱没有这条可核验的直接关联。',
+        'association': null,
+      };
+    } else {
+      outcome = {
+        'kind': 'evidence',
+        'evidence': '当前图谱记录：李白是《将进酒》的作者。',
+        'source': [
+          {'label': '固定来源', 'url': 'https://example.test/source'},
+        ],
+        'path': ['李白', '作者', '将进酒'],
+      };
+    }
+    final body = envelope(
+      stage: isSeek ? 'annotation' : 'transcription',
+      status: 'ok',
+      transcription: isSeek ? null : {'text': text, 'candidates': <String>[]},
+      outcome: isSeek ? outcome : null,
+    );
+    return http.Response.bytes(
+      utf8.encode(jsonEncode(body)),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+  });
+  final session = SaberPiSession(
+    bridge: SaberPiBridgeClient(
+      baseUri: Uri.parse('http://127.0.0.1:4175'),
+      client: client,
+    ),
+  );
+  await session.onPenUp(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-outcome',
+    mode: SaberPiMode.seek,
+    capturePng: () async => ink,
+  );
+  final state = await session.confirm(text);
+  return state.result!;
+}
+
 Future<void> main() async {
   final ink = Uint8List.fromList([137, 80, 78, 71]);
   final calls = <String>[];
@@ -160,6 +219,18 @@ Future<void> main() async {
         failedState.ink == ink &&
         failedCaptures == 1,
     'transcription failure left the session stuck or dropped ink',
+  );
+
+  final ambiguousResult = await runOutcomeCase(ink: ink, text: '李贺和长安有什么关联？');
+  expectCondition(
+    ambiguousResult.outcome?['kind'] == 'ambiguous' &&
+        (ambiguousResult.outcome?['candidates'] as List).length == 2,
+    'ambiguity candidates were not retained for the margin panel',
+  );
+  final gapResult = await runOutcomeCase(ink: ink, text: '珊瑚与唐诗有什么关联？');
+  expectCondition(
+    gapResult.outcome?['kind'] == 'gap' && gapResult.outcome?['gap'] is String,
+    'evidence gap was not retained for the margin panel',
   );
 
   stdout.writeln(

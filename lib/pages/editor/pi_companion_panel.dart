@@ -19,6 +19,49 @@ class PiCompanionPanel extends StatelessWidget {
   final ValueChanged<SaberPiMode> onModeChanged;
   final VoidCallback onConfirm;
 
+  String? _textValue(Object? value) {
+    if (value is! String) return null;
+    final text = value.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  List<Widget> _outcomeDetails(String kind) {
+    final outcome = state.result?.outcome;
+    if (outcome == null) return const [];
+
+    final details = <Widget>[];
+    if (kind == 'evidence') {
+      final evidence = _textValue(outcome['evidence']);
+      final path = (outcome['path'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .join(' → ');
+      final sources = outcome['source'];
+      final firstSource = sources is List && sources.isNotEmpty
+          ? sources.first
+          : null;
+      final sourceLabel = firstSource is Map
+          ? _textValue(firstSource['label'])
+          : null;
+      if (evidence != null) details.add(Text(evidence));
+      if (path.isNotEmpty) details.add(Text('路径：$path'));
+      if (sourceLabel != null) details.add(Text('来源：$sourceLabel'));
+    } else if (kind == 'ambiguous') {
+      final clarification = _textValue(outcome['clarification']);
+      final candidates = (outcome['candidates'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .map((candidate) => '· $candidate')
+          .join('\n');
+      if (clarification != null) details.add(Text(clarification));
+      if (candidates.isNotEmpty) details.add(Text('候选：\n$candidates'));
+    } else if (kind == 'gap') {
+      final gap = _textValue(outcome['gap']);
+      final association = _textValue(outcome['association']);
+      if (gap != null) details.add(Text(gap));
+      if (association != null) details.add(Text(association));
+    }
+    return details;
+  }
+
   @override
   Widget build(BuildContext context) {
     final outcomeKind = state.result?.outcome?['kind'];
@@ -84,22 +127,25 @@ class PiCompanionPanel extends StatelessWidget {
                     onPressed: onConfirm,
                     child: const Text('确认并寻迹'),
                   ),
-                ] else if (outcomeKind == 'evidence')
+                ] else if (outcomeKind == 'evidence') ...[
                   const Text(
                     '有证据',
                     style: TextStyle(fontWeight: FontWeight.bold),
-                  )
-                else if (outcomeKind == 'ambiguous')
+                  ),
+                  ..._outcomeDetails('evidence'),
+                ] else if (outcomeKind == 'ambiguous') ...[
                   const Text(
                     '有歧义',
                     style: TextStyle(fontWeight: FontWeight.bold),
-                  )
-                else if (outcomeKind == 'gap')
+                  ),
+                  ..._outcomeDetails('ambiguous'),
+                ] else if (outcomeKind == 'gap') ...[
                   const Text(
                     '有缺口',
                     style: TextStyle(fontWeight: FontWeight.bold),
-                  )
-                else if (state.phase == SaberPiPhase.ready)
+                  ),
+                  ..._outcomeDetails('gap'),
+                ] else if (state.phase == SaberPiPhase.ready)
                   const Text('等待下一段笔迹。'),
                 if (visibleError != null) ...[
                   const SizedBox(height: 6),
