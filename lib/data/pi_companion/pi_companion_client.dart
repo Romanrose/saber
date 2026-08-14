@@ -81,6 +81,7 @@ class SaberPiBridgeClient {
     required this.baseUri,
     http.Client? client,
     this.timeout = const Duration(seconds: 8),
+    this.seekTimeout = const Duration(seconds: 15),
   }) : _httpClient = client ?? http.Client(),
        _ownsHttpClient = client == null;
 
@@ -89,7 +90,10 @@ class SaberPiBridgeClient {
   final Uri baseUri;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
+  /// OCR stays bounded at eight seconds; confirmed Pi seek may include a
+  /// source-validated model turn and needs a separate, explicit allowance.
   final Duration timeout;
+  final Duration seekTimeout;
 
   void close() {
     if (_ownsHttpClient) _httpClient.close();
@@ -143,7 +147,7 @@ class SaberPiBridgeClient {
           headers: const {'Content-Type': 'application/json'},
           body: jsonEncode(body),
         )
-        .timeout(timeout);
+        .timeout(endpoint == 'seek' ? seekTimeout : timeout);
     final decoded = jsonDecode(response.body);
     if (decoded is! Map<String, dynamic>) {
       throw const SaberPiBridgeException('invalid_bridge_response');

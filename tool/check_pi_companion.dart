@@ -98,6 +98,15 @@ Future<SaberPiBridgeResult> runOutcomeCase({
 
 Future<void> main() async {
   final ink = Uint8List.fromList([137, 80, 78, 71]);
+  final defaultTimeouts = SaberPiBridgeClient(
+    baseUri: Uri.parse('http://127.0.0.1:4175'),
+  );
+  expectCondition(
+    defaultTimeouts.timeout == const Duration(seconds: 8) &&
+        defaultTimeouts.seekTimeout == const Duration(seconds: 15),
+    'transcription and confirmed seek must keep separate deadlines',
+  );
+  defaultTimeouts.close();
   final calls = <String>[];
   final requests = <http.BaseRequest>[];
   final client = MockClient((request) async {
