@@ -28,7 +28,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.adilhanney.saber"
+        // Keep the experiment installable next to a user's official Saber app.
+        applicationId = "com.adilhanney.saber.spike"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
