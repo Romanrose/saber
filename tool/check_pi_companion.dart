@@ -102,7 +102,7 @@ Future<void> main() async {
     baseUri: Uri.parse('http://127.0.0.1:4175'),
   );
   expectCondition(
-    defaultTimeouts.timeout == const Duration(seconds: 8) &&
+    defaultTimeouts.timeout == const Duration(seconds: 10) &&
         defaultTimeouts.seekTimeout == const Duration(seconds: 15),
     'transcription and confirmed seek must keep separate deadlines',
   );

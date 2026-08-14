@@ -80,7 +80,7 @@ class SaberPiBridgeClient {
   SaberPiBridgeClient({
     required this.baseUri,
     http.Client? client,
-    this.timeout = const Duration(seconds: 8),
+    this.timeout = const Duration(seconds: 10),
     this.seekTimeout = const Duration(seconds: 15),
   }) : _httpClient = client ?? http.Client(),
        _ownsHttpClient = client == null;
@@ -90,8 +90,10 @@ class SaberPiBridgeClient {
   final Uri baseUri;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
-  /// OCR stays bounded at eight seconds; confirmed Pi seek may include a
-  /// source-validated model turn and needs a separate, explicit allowance.
+  /// OCR remains server-bounded at eight seconds. The client keeps two seconds
+  /// of transport margin so it can receive the server's final safe result.
+  /// Confirmed Pi seek may include a source-validated model turn and needs a
+  /// separate, explicit allowance.
   final Duration timeout;
   final Duration seekTimeout;
 
