@@ -163,11 +163,18 @@ abstract class EditorExporter {
     bool rasterizeAllStrokes = false,
     Size? targetSize,
     double? cropHeight,
+    Rect? cropRect,
     double pixelRatio = 2,
   }) async {
     final page = coreInfo.pages[pageIndex].cloneForRasterization(
       rasterizeAllStrokes: rasterizeAllStrokes,
     );
+    final pageBounds = Offset.zero & page.size;
+    final boundedCrop = cropRect?.intersect(pageBounds);
+    if (boundedCrop != null &&
+        (boundedCrop.width <= 0 || boundedCrop.height <= 0)) {
+      throw ArgumentError.value(cropRect, 'cropRect', 'must overlap the page');
+    }
 
     final imagesToLoad = [
       ?page.backgroundImage,
@@ -178,18 +185,37 @@ abstract class EditorExporter {
     ).timeout(const Duration(seconds: 10), onTimeout: () => const []);
 
     try {
-      targetSize ??= page.size;
+      targetSize ??= boundedCrop?.size ?? page.size;
       coreInfo = coreInfo.copyWith(
         pages: [for (var i = 0; i < coreInfo.pages.length; ++i) page],
+      );
+      final preview = CanvasPreview(
+        pageIndex: pageIndex,
+        height: boundedCrop == null ? cropHeight : page.size.height,
+        coreInfo: coreInfo,
       );
       return await ScreenshotController.widgetToUiImage(
         EditorExporterTheme(
           targetSize: targetSize,
-          child: CanvasPreview(
-            pageIndex: pageIndex,
-            height: cropHeight,
-            coreInfo: coreInfo,
-          ),
+          child: boundedCrop == null
+              ? preview
+              : ClipRect(
+                  child: SizedBox(
+                    width: boundedCrop.width,
+                    height: boundedCrop.height,
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      minWidth: page.size.width,
+                      maxWidth: page.size.width,
+                      minHeight: page.size.height,
+                      maxHeight: page.size.height,
+                      child: Transform.translate(
+                        offset: -boundedCrop.topLeft,
+                        child: preview,
+                      ),
+                    ),
+                  ),
+                ),
         ),
         pixelRatio: pixelRatio,
         targetSize: targetSize,

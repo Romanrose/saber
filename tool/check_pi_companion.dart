@@ -163,6 +163,69 @@ Future<void> main() async {
     'client attempted to send a credential header',
   );
 
+  final delayedCalls = <String>[];
+  final delayedSession = SaberPiSession(
+    bridge: SaberPiBridgeClient(
+      baseUri: Uri.parse('http://127.0.0.1:4175'),
+      client: MockClient((request) async {
+        delayedCalls.add('transcribe');
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode(
+              envelope(
+                stage: 'transcription',
+                status: 'ok',
+                pageId: body['pageId'] as String,
+                strokeSegmentId: body['strokeSegmentId'] as String,
+                mode: body['mode'] as String,
+                transcription: {'text': '合并笔迹', 'candidates': <String>[]},
+              ),
+            ),
+          ),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    ),
+    onLocalAwakening: () => delayedCalls.add('local_awakening'),
+  );
+  delayedSession.beginSegment(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-grouped',
+    mode: SaberPiMode.seek,
+  );
+  expectCondition(
+    delayedCalls.join(',') == 'local_awakening' &&
+        delayedSession.state.phase == SaberPiPhase.awakening,
+    'local awakening waited for the segment debounce',
+  );
+  var staleCaptureCount = 0;
+  await delayedSession.transcribeSegment(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'other-segment',
+    mode: SaberPiMode.seek,
+    capturePng: () async {
+      staleCaptureCount++;
+      return ink;
+    },
+  );
+  expectCondition(
+    staleCaptureCount == 0 && delayedCalls.join(',') == 'local_awakening',
+    'a stale segment captured or crossed the bridge',
+  );
+  await delayedSession.transcribeSegment(
+    pageId: 'note-01-page-01',
+    strokeSegmentId: 'segment-grouped',
+    mode: SaberPiMode.seek,
+    capturePng: () async => ink,
+  );
+  expectCondition(
+    delayedCalls.join(',') == 'local_awakening,transcribe' &&
+        delayedSession.state.phase == SaberPiPhase.awaitingConfirmation,
+    'grouped segment did not transcribe after local awakening',
+  );
+
   var confirmationRejected = false;
   try {
     await session.confirm('');

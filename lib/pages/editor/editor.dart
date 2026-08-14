@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:collapsible/collapsible.dart';
 import 'package:file_picker/file_picker.dart';
@@ -55,6 +56,22 @@ import 'package:sbn/change.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 typedef _PhotoInfo = ({Uint8List bytes, String extension});
+
+class _PiInkSegment {
+  _PiInkSegment({
+    required this.pageIndex,
+    required this.strokeSegmentId,
+    required this.bounds,
+  });
+
+  final int pageIndex;
+  final String strokeSegmentId;
+  Rect bounds;
+
+  void include(Stroke stroke) {
+    bounds = bounds.expandToInclude(stroke.bounds);
+  }
+}
 
 class Editor extends StatefulWidget {
   Editor({super.key, String? path, this.customTitle, this.pdfPath})
@@ -191,6 +208,12 @@ class EditorState extends State<Editor> {
   final _piConfirmationController = TextEditingController();
   var _piMode = SaberPiMode.seek;
   String? _piError;
+  static const _piSegmentIdleDuration = Duration(milliseconds: 550);
+  static const _piCapturePadding = 48.0;
+  static const _piMinimumCaptureWidth = 280.0;
+  static const _piMinimumCaptureHeight = 200.0;
+  Timer? _piSegmentTimer;
+  _PiInkSegment? _pendingPiSegment;
 
   /// The last non-Eraser [currentTool] value.
   late Tool _lastNonEraserTool = Pen.currentPen;
@@ -665,7 +688,7 @@ class EditorState extends State<Editor> {
     final page = coreInfo.pages[dragPageIndex!];
     bool shouldSave = true;
     int? piPageIndex;
-    String? piStrokeSegmentId;
+    Stroke? piStroke;
     setState(() {
       if (currentTool is Pen) {
         final newStroke = (currentTool as Pen).onDragEnd();
@@ -681,7 +704,7 @@ class EditorState extends State<Editor> {
         createPage(newStroke.pageIndex);
         page.insertStroke(newStroke);
         piPageIndex = dragPageIndex;
-        piStrokeSegmentId = 'stroke-${DateTime.now().microsecondsSinceEpoch}';
+        piStroke = newStroke;
         history.recordChange(
           EditorHistoryItem(
             type: .draw,
@@ -745,24 +768,81 @@ class EditorState extends State<Editor> {
     });
 
     if (shouldSave) autosaveAfterDelay();
-    if (piPageIndex != null && piStrokeSegmentId != null) {
-      _startPiCompanionTurn(piPageIndex!, piStrokeSegmentId!);
+    if (piPageIndex != null && piStroke != null) {
+      _queuePiCompanionStroke(piPageIndex!, piStroke!);
     }
   }
 
-  void _startPiCompanionTurn(int pageIndex, String strokeSegmentId) {
+  void _queuePiCompanionStroke(int pageIndex, Stroke stroke) {
+    _piSegmentTimer?.cancel();
+    if (_piMode == SaberPiMode.quiet) {
+      _pendingPiSegment = null;
+      _piSession.beginSegment(
+        pageId: 'page-$pageIndex',
+        strokeSegmentId: 'quiet-${DateTime.now().microsecondsSinceEpoch}',
+        mode: SaberPiMode.quiet,
+      );
+      return;
+    }
+
+    final pending = _pendingPiSegment;
+    final segment = pending != null && pending.pageIndex == pageIndex
+        ? (pending..include(stroke))
+        : _PiInkSegment(
+            pageIndex: pageIndex,
+            strokeSegmentId: 'segment-${DateTime.now().microsecondsSinceEpoch}',
+            bounds: stroke.bounds,
+          );
+    _pendingPiSegment = segment;
+    _piSession.beginSegment(
+      pageId: 'page-$pageIndex',
+      strokeSegmentId: segment.strokeSegmentId,
+      mode: SaberPiMode.seek,
+    );
+    _piSegmentTimer = Timer(_piSegmentIdleDuration, () {
+      if (!mounted || _piMode != SaberPiMode.seek) return;
+      if (!identical(_pendingPiSegment, segment)) return;
+      _pendingPiSegment = null;
+      _transcribePiSegment(segment);
+    });
+  }
+
+  Rect _piCaptureRect(Rect bounds, Size pageSize) {
+    final width = min(
+      pageSize.width,
+      max(bounds.width + 2 * _piCapturePadding, _piMinimumCaptureWidth),
+    );
+    final height = min(
+      pageSize.height,
+      max(bounds.height + 2 * _piCapturePadding, _piMinimumCaptureHeight),
+    );
+    final left = (bounds.center.dx - width / 2)
+        .clamp(0.0, pageSize.width - width)
+        .toDouble();
+    final top = (bounds.center.dy - height / 2)
+        .clamp(0.0, pageSize.height - height)
+        .toDouble();
+    return Rect.fromLTWH(left, top, width, height);
+  }
+
+  void _transcribePiSegment(_PiInkSegment segment) {
     _piError = null;
     unawaited(() async {
       try {
-        await _piSession.onPenUp(
-          pageId: 'page-$pageIndex',
-          strokeSegmentId: strokeSegmentId,
-          mode: _piMode,
+        await _piSession.transcribeSegment(
+          pageId: 'page-${segment.pageIndex}',
+          strokeSegmentId: segment.strokeSegmentId,
+          mode: SaberPiMode.seek,
           capturePng: () async {
+            final cropRect = _piCaptureRect(
+              segment.bounds,
+              coreInfo.pages[segment.pageIndex].size,
+            );
             final image = await EditorExporter.screenshotPage(
               coreInfo: coreInfo,
-              pageIndex: pageIndex,
+              pageIndex: segment.pageIndex,
               rasterizeAllStrokes: true,
+              cropRect: cropRect,
               pixelRatio: 1,
             );
             try {
@@ -782,6 +862,14 @@ class EditorState extends State<Editor> {
         if (mounted) setState(() => _piError = error.toString());
       }
     }());
+  }
+
+  void _onPiModeChanged(SaberPiMode mode) {
+    if (mode == SaberPiMode.quiet) {
+      _piSegmentTimer?.cancel();
+      _pendingPiSegment = null;
+    }
+    setState(() => _piMode = mode);
   }
 
   void _confirmPiTranscription() {
@@ -1672,7 +1760,7 @@ class EditorState extends State<Editor> {
             state: _piSession.state,
             confirmationController: _piConfirmationController,
             error: _piError,
-            onModeChanged: (mode) => setState(() => _piMode = mode),
+            onModeChanged: _onPiModeChanged,
             onConfirm: _confirmPiTranscription,
           ),
         ),
@@ -2158,6 +2246,7 @@ class EditorState extends State<Editor> {
     _delayedSaveTimer?.cancel();
     _watchServerTimer?.cancel();
     _lastSeenPointerCountTimer?.cancel();
+    _piSegmentTimer?.cancel();
     _piConfirmationController.dispose();
     _piBridge.close();
 

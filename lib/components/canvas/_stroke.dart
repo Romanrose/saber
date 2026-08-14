@@ -315,6 +315,18 @@ class Stroke {
     return points.isEmpty ? 0 : points.map((point) => point.y).reduce(max);
   }
 
+  /// The smallest page-space rectangle containing this stroke, including its
+  /// visible pen width. Consumers use this as a hint only; it does not alter
+  /// rendering, history, or the serialized digital ink.
+  Rect get bounds {
+    if (points.isEmpty) return Rect.zero;
+    final minX = points.map((point) => point.x).reduce(min);
+    final maxX = points.map((point) => point.x).reduce(max);
+    final minY = points.map((point) => point.y).reduce(min);
+    final maxY = points.map((point) => point.y).reduce(max);
+    return Rect.fromLTRB(minX, minY, maxX, maxY).inflate(options.size);
+  }
+
   RecognizedUnistroke? detectShape() {
     if (points.length < 3) return null;
     return recognizeUnistroke(points);

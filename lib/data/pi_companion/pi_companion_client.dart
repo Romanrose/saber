@@ -202,36 +202,52 @@ class SaberPiSession {
 
   SaberPiSessionState get state => _state;
 
-  Future<SaberPiSessionState> onPenUp({
+  /// Shows the local page response immediately. Call [transcribeSegment] only
+  /// once consecutive pen strokes have been grouped into one ink segment.
+  void beginSegment({
     required String pageId,
     required String strokeSegmentId,
     required SaberPiMode mode,
-    required Future<Uint8List> Function() capturePng,
-  }) async {
-    final turn = ++_turn;
+  }) {
+    ++_turn;
     if (mode == SaberPiMode.quiet) {
-      return _publish(
+      _publish(
         SaberPiSessionState(
           phase: SaberPiPhase.quiet,
           pageId: pageId,
           strokeSegmentId: strokeSegmentId,
         ),
       );
+      return;
     }
 
-    if (mode == SaberPiMode.seek) {
-      _publish(
-        SaberPiSessionState(
-          phase: SaberPiPhase.awakening,
-          pageId: pageId,
-          strokeSegmentId: strokeSegmentId,
-        ),
-      );
-      // This callback is deliberately before screenshot capture and the first
-      // awaited bridge call, so local feedback never waits on the network.
-      onLocalAwakening?.call();
+    _publish(
+      SaberPiSessionState(
+        phase: SaberPiPhase.awakening,
+        pageId: pageId,
+        strokeSegmentId: strokeSegmentId,
+      ),
+    );
+    // This is deliberately before PNG capture and the bridge call, so the
+    // paper response never waits on grouping, rendering, or the network.
+    onLocalAwakening?.call();
+  }
+
+  Future<SaberPiSessionState> transcribeSegment({
+    required String pageId,
+    required String strokeSegmentId,
+    required SaberPiMode mode,
+    required Future<Uint8List> Function() capturePng,
+  }) async {
+    if (mode == SaberPiMode.quiet) return _state;
+    final current = _state;
+    if (current.phase != SaberPiPhase.awakening ||
+        current.pageId != pageId ||
+        current.strokeSegmentId != strokeSegmentId) {
+      return current;
     }
 
+    final turn = _turn;
     Uint8List? png;
     try {
       png = await capturePng();
@@ -287,6 +303,21 @@ class SaberPiSession {
         ),
       );
     }
+  }
+
+  Future<SaberPiSessionState> onPenUp({
+    required String pageId,
+    required String strokeSegmentId,
+    required SaberPiMode mode,
+    required Future<Uint8List> Function() capturePng,
+  }) async {
+    beginSegment(pageId: pageId, strokeSegmentId: strokeSegmentId, mode: mode);
+    return transcribeSegment(
+      pageId: pageId,
+      strokeSegmentId: strokeSegmentId,
+      mode: mode,
+      capturePng: capturePng,
+    );
   }
 
   Future<SaberPiSessionState> confirm(String text) async {
