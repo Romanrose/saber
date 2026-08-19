@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:saber/components/home/sort_button.dart';
 import 'package:saber/data/nextcloud/saber_syncer.dart';
+import 'package:saber/data/pi_companion/pi_companion_sidecar.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/i18n/strings.g.dart';
 import 'package:saber/pages/editor/editor.dart';
@@ -26,6 +27,7 @@ class FileManager {
   FileManager._();
 
   static final log = Logger('FileManager');
+  static const _piSidecarStore = SaberPiSidecarStore();
 
   static const appRootDirectoryPrefix = 'Saber';
 
@@ -168,6 +170,10 @@ class FileManager {
           // The path may or may not be relative,
           // so remove the root directory path to make sure it's relative.
           .replaceFirst(documentsDirectory, '');
+      // Companion history is deliberately local-only. Ignore both its final
+      // file and the temporary sibling used for its atomic write so neither
+      // becomes a regular Saber write event or a sync candidate downstream.
+      if (SaberPiSidecarStore.isSidecarArtifactPath(path)) return;
       broadcastFileWrite(type, path);
     });
   }
@@ -399,6 +405,15 @@ class FileManager {
     await _createFileDirectory(toPath);
     if (fromFile.existsSync()) {
       await fromFile.rename(toFile.path);
+      if (fromPath.endsWith(Editor.extension)) {
+        try {
+          await _piSidecarStore.moveForNote(fromFile, toFile);
+        } on Object catch (error, stackTrace) {
+          // The primary Saber note has already moved successfully. Keep both
+          // sidecars intact instead of risking an overwrite or sync action.
+          log.warning('Could not move Pi companion sidecar', error, stackTrace);
+        }
+      }
     } else {
       log.warning('Tried to move non-existent file from $fromPath to $toPath');
     }
@@ -451,6 +466,18 @@ class FileManager {
     final file = getFile(filePath);
     if (!file.existsSync()) return;
     await file.delete();
+
+    // Companion files are intentionally local-only and must not enter Saber
+    // sync queues or regular file-write broadcasts.
+    if (SaberPiSidecarStore.isSidecarPath(filePath)) return;
+
+    if (filePath.endsWith(Editor.extension)) {
+      try {
+        await _piSidecarStore.deleteForNote(file);
+      } on Object catch (error, stackTrace) {
+        log.warning('Could not delete Pi companion sidecar', error, stackTrace);
+      }
+    }
 
     if (alsoUpload) syncer.uploader.enqueueRel(filePath);
 
@@ -516,6 +543,7 @@ class FileManager {
     await directory.rename(documentsDirectory + newPath);
 
     for (final child in children) {
+      if (SaberPiSidecarStore.isSidecarPath(directoryPath + child)) continue;
       _renameReferences(directoryPath + child, newPath + child);
       broadcastFileWrite(FileOperationType.delete, directoryPath + child);
       broadcastFileWrite(FileOperationType.write, newPath + child);

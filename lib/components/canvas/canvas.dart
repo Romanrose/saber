@@ -25,6 +25,7 @@ class Canvas extends StatelessWidget {
     required this.setAsBackground,
     required this.currentTool,
     required this.currentScale,
+    this.annotationOverlay,
     this.placeholder = false,
   });
 
@@ -42,7 +43,13 @@ class Canvas extends StatelessWidget {
 
   final Tool currentTool;
   final double currentScale;
+  final Widget? annotationOverlay;
   final bool placeholder;
+
+  List<Widget> get _annotationChildren => switch (annotationOverlay) {
+    final overlay? => [overlay],
+    null => const [],
+  };
 
   OnyxStrokeStyle _getOnyxTool(Tool currentTool) {
     if (placeholder) return OnyxStrokeStyle.pen;
@@ -109,26 +116,35 @@ class Canvas extends StatelessWidget {
               ? SizedBox(
                   width: page.size.width,
                   height: page.size.height,
-                  child: OnyxSdkPenArea(
-                    refreshDelay: const Duration(seconds: 1),
-                    strokeStyle: _getOnyxTool(currentTool),
-                    strokeColor: _getOnyxColor(),
-                    strokeWidth: _getOnyxWidth(),
-                    child: InnerCanvas(
-                      key: page.innerCanvasKey,
-                      pageIndex: pageIndex,
-                      redrawPageListenable: page,
-                      width: page.size.width,
-                      height: page.size.height,
-                      textEditing: textEditing,
-                      coreInfo: coreInfo,
-                      currentStroke: currentStroke,
-                      currentStrokeDetectedShape: currentStrokeDetectedShape,
-                      currentSelection: currentSelection,
-                      setAsBackground: setAsBackground,
-                      currentToolIsSelect: currentTool.toolId == ToolId.select,
-                      currentScale: currentScale,
-                    ),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: OnyxSdkPenArea(
+                          refreshDelay: const Duration(seconds: 1),
+                          strokeStyle: _getOnyxTool(currentTool),
+                          strokeColor: _getOnyxColor(),
+                          strokeWidth: _getOnyxWidth(),
+                          child: InnerCanvas(
+                            key: page.innerCanvasKey,
+                            pageIndex: pageIndex,
+                            redrawPageListenable: page,
+                            width: page.size.width,
+                            height: page.size.height,
+                            textEditing: textEditing,
+                            coreInfo: coreInfo,
+                            currentStroke: currentStroke,
+                            currentStrokeDetectedShape:
+                                currentStrokeDetectedShape,
+                            currentSelection: currentSelection,
+                            setAsBackground: setAsBackground,
+                            currentToolIsSelect:
+                                currentTool.toolId == ToolId.select,
+                            currentScale: currentScale,
+                          ),
+                        ),
+                      ),
+                      ..._annotationChildren,
+                    ],
                   ),
                 )
               : SizedBox(width: page.size.width, height: page.size.height),

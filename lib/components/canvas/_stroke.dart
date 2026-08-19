@@ -23,6 +23,13 @@ class Stroke {
   bool get isEmpty => points.isEmpty;
   int get length => points.length;
 
+  /// An immutable, pressure-free representation for on-device digital ink
+  /// recognition. The original stroke remains the source of truth.
+  List<Map<String, double>> digitalInkPoints() => points
+      .where((point) => point.isFinite)
+      .map((point) => {'x': point.x, 'y': point.y})
+      .toList(growable: false);
+
   int pageIndex;
   HasSize page;
   final ToolId toolId;

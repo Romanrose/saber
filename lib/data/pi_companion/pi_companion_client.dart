@@ -5,7 +5,146 @@ import 'package:http/http.dart' as http;
 
 enum SaberPiMode { quiet, seek }
 
-enum SaberPiPhase { rest, awakening, awaitingConfirmation, ready, quiet }
+enum SaberPiPhase {
+  rest,
+  awakening,
+  awaitingConfirmation,
+  seeking,
+  ready,
+  quiet,
+}
+
+const _journeyRoutes = {'life', 'space', 'work'};
+
+String _journeyRouteLabel(String? route) => switch (route) {
+  'life' => '经历线',
+  'space' => '地点线',
+  'work' => '作品线',
+  _ => '待展开',
+};
+
+String _journeyPrompt(String? route, int step) {
+  if (route == 'space') {
+    if (step == 0) return '下一笔，写下这条人生线的第一个地点。';
+    if (step == 1) return '下一笔，再写一个与他有关的地点。';
+    if (step == 2) return '下一笔，写下前面地点之间发生了怎样的变化。';
+    return '下一笔，回望这条地点线，写下你想留下的问题。';
+  }
+  if (route == 'work') {
+    if (step == 0) return '下一笔，写下他的一件作品或一句诗。';
+    if (step == 1) return '下一笔，再写一件作品或一句诗。';
+    if (step == 2) return '下一笔，写下这些作品背后的经历。';
+    return '下一笔，回望这条作品线，写下你想留下的问题。';
+  }
+  if (route == 'life') {
+    if (step == 0) return '下一笔，写下他人生中的一次转折。';
+    if (step == 1) return '下一笔，再写一次改变方向的经历。';
+    if (step == 2) return '下一笔，写下这段经历与时代的关系。';
+    return '下一笔，回望这条经历线，写下你想留下的问题。';
+  }
+  return '先选一条路线，再写第一条线索。';
+}
+
+class SaberPiJourneyState {
+  const SaberPiJourneyState({
+    required this.personId,
+    required this.anchor,
+    required this.route,
+    required this.step,
+    required this.visitedNodes,
+    required this.unresolvedQuestions,
+  });
+
+  final String personId;
+  final String anchor;
+  final String? route;
+  final int step;
+  final List<String> visitedNodes;
+  final List<String> unresolvedQuestions;
+
+  factory SaberPiJourneyState.fromAnchor(Map<String, dynamic> value) {
+    final personId = value['id'];
+    final anchor = value['name'];
+    if (personId is! String ||
+        personId.trim().isEmpty ||
+        anchor is! String ||
+        anchor.trim().isEmpty) {
+      throw const SaberPiBridgeException('invalid_person_anchor');
+    }
+    return SaberPiJourneyState(
+      personId: personId.trim(),
+      anchor: anchor.trim(),
+      route: null,
+      step: 0,
+      visitedNodes: const [],
+      unresolvedQuestions: [_journeyPrompt(null, 0)],
+    );
+  }
+
+  SaberPiJourneyState selectRoute(String nextRoute) {
+    if (!_journeyRoutes.contains(nextRoute) || route != null) return this;
+    return SaberPiJourneyState(
+      personId: personId,
+      anchor: anchor,
+      route: nextRoute,
+      step: step,
+      visitedNodes: visitedNodes,
+      unresolvedQuestions: [_journeyPrompt(nextRoute, step)],
+    );
+  }
+
+  SaberPiJourneyState advance(Map<String, dynamic>? outcome) {
+    if (route == null || outcome?['kind'] != 'evidence') return this;
+    final path = (outcome?['path'] as List<dynamic>? ?? const [])
+        .whereType<String>()
+        .map((node) => node.trim())
+        .where((node) => node.isNotEmpty && node != anchor);
+    final nodes = <String>[...visitedNodes, ...path];
+    final bounded = <String>[];
+    for (final node in nodes) {
+      if (!bounded.contains(node)) bounded.add(node);
+    }
+    final nextStep = step + 1;
+    return SaberPiJourneyState(
+      personId: personId,
+      anchor: anchor,
+      route: route,
+      step: nextStep,
+      visitedNodes: bounded.take(24).toList(growable: false),
+      unresolvedQuestions: [_journeyPrompt(route, nextStep)],
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'personId': personId,
+    'anchor': anchor,
+    'route': route,
+    'step': step,
+    'visitedNodes': visitedNodes,
+    'unresolvedQuestions': unresolvedQuestions,
+  };
+
+  String get routeLabel => _journeyRouteLabel(route);
+  String get nextPrompt => unresolvedQuestions.isEmpty
+      ? _journeyPrompt(route, step)
+      : unresolvedQuestions.first;
+}
+
+String? saberPiSeekError(SaberPiBridgeResult result) => switch (result.status) {
+  'ok' => null,
+  // A confirmed person-first seek can legitimately stop at a verified
+  // Souyun anchor before the reader chooses a route for the next stroke.
+  // Treating this as an error made the paper show
+  // “寻迹未完成：anchor_ready” even though the anchor was accepted.
+  'anchor_ready' => null,
+  'graph_unconfigured' => '当前图谱数据尚未就绪。',
+  'graph_timed_out' => '图谱检索超时，请重试。',
+  'graph_unavailable' => '图谱暂时不可用，请重试。',
+  'model_unconfigured' => '寻迹模型尚未配置。',
+  'needs_transcription' => '请先确认一段文字。',
+  'route_selection_required' => '人物已确认；请先选择地点、经历或作品路线。',
+  _ => '寻迹未完成：${result.status}',
+};
 
 class SaberPiBridgeException implements Exception {
   const SaberPiBridgeException(this.message);
@@ -42,6 +181,7 @@ class SaberPiBridgeResult {
     this.transcription,
     this.outcome,
     this.providerStatus,
+    this.anchor,
   });
 
   final String status;
@@ -50,6 +190,7 @@ class SaberPiBridgeResult {
   final SaberPiTranscription? transcription;
   final Map<String, dynamic>? outcome;
   final String? providerStatus;
+  final Map<String, dynamic>? anchor;
 
   factory SaberPiBridgeResult.fromJson(Map<String, dynamic> json) {
     final status = json['status'];
@@ -72,6 +213,9 @@ class SaberPiBridgeResult {
           : null,
       outcome: outcomeJson is Map<String, dynamic> ? outcomeJson : null,
       providerStatus: json['providerStatus'] as String?,
+      anchor: json['anchor'] is Map<String, dynamic>
+          ? json['anchor'] as Map<String, dynamic>
+          : null,
     );
   }
 }
@@ -90,6 +234,7 @@ class SaberPiBridgeClient {
   final Uri baseUri;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
+
   /// OCR remains server-bounded at eight seconds. The client keeps two seconds
   /// of transport margin so it can receive the server's final safe result.
   /// Confirmed Pi seek may include a source-validated model turn and needs a
@@ -128,16 +273,21 @@ class SaberPiBridgeClient {
     required String strokeSegmentId,
     required Uint8List png,
     required String confirmedText,
-  }) => _post('seek', {
-    'pageId': pageId,
-    'strokeSegmentId': strokeSegmentId,
-    'mode': SaberPiMode.seek.name,
-    'image': {
-      'mimeType': 'image/png',
-      'data': 'data:image/png;base64,${base64Encode(png)}',
-    },
-    'confirmedText': confirmedText,
-  });
+    Map<String, dynamic>? journey,
+  }) {
+    final body = <String, dynamic>{
+      'pageId': pageId,
+      'strokeSegmentId': strokeSegmentId,
+      'mode': SaberPiMode.seek.name,
+      'image': {
+        'mimeType': 'image/png',
+        'data': 'data:image/png;base64,${base64Encode(png)}',
+      },
+      'confirmedText': confirmedText,
+    };
+    if (journey != null) body['journey'] = journey;
+    return _post('seek', body);
+  }
 
   Future<SaberPiBridgeResult> _post(
     String endpoint,
@@ -182,6 +332,7 @@ class SaberPiSessionState {
     this.transcription,
     this.result,
     this.error,
+    this.journey,
   });
 
   final SaberPiPhase phase;
@@ -191,6 +342,28 @@ class SaberPiSessionState {
   final SaberPiTranscription? transcription;
   final SaberPiBridgeResult? result;
   final String? error;
+  final SaberPiJourneyState? journey;
+
+  SaberPiSessionState copyWith({
+    SaberPiPhase? phase,
+    String? pageId,
+    String? strokeSegmentId,
+    Uint8List? ink,
+    SaberPiTranscription? transcription,
+    SaberPiBridgeResult? result,
+    String? error,
+    bool clearError = false,
+    SaberPiJourneyState? journey,
+  }) => SaberPiSessionState(
+    phase: phase ?? this.phase,
+    pageId: pageId ?? this.pageId,
+    strokeSegmentId: strokeSegmentId ?? this.strokeSegmentId,
+    ink: ink ?? this.ink,
+    transcription: transcription ?? this.transcription,
+    result: result ?? this.result,
+    error: clearError ? null : error ?? this.error,
+    journey: journey ?? this.journey,
+  );
 }
 
 class SaberPiSession {
@@ -204,9 +377,20 @@ class SaberPiSession {
   final void Function()? onLocalAwakening;
   final void Function(SaberPiSessionState state)? onStateChanged;
   var _state = const SaberPiSessionState(phase: SaberPiPhase.rest);
+  SaberPiJourneyState? _journey;
   var _turn = 0;
 
   SaberPiSessionState get state => _state;
+
+  void selectJourneyRoute(String route) {
+    final current = _journey;
+    if (current == null ||
+        current.route != null ||
+        !_journeyRoutes.contains(route))
+      return;
+    _journey = current.selectRoute(route);
+    _publish(_state.copyWith(journey: _journey, clearError: true));
+  }
 
   /// Shows the local page response immediately. Call [transcribeSegment] only
   /// once consecutive pen strokes have been grouped into one ink segment.
@@ -254,15 +438,70 @@ class SaberPiSession {
     }
 
     final turn = _turn;
-    Uint8List? png;
     try {
-      png = await capturePng();
+      final png = await capturePng();
       if (turn != _turn) return _state;
+      return _transcribeCapturedInk(
+        pageId: pageId,
+        strokeSegmentId: strokeSegmentId,
+        png: png,
+        turn: turn,
+      );
+    } on Object catch (error) {
+      if (turn != _turn) return _state;
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: pageId,
+          strokeSegmentId: strokeSegmentId,
+          error: error is SaberPiBridgeException
+              ? error.message
+              : error.toString(),
+        ),
+      );
+    }
+  }
 
+  /// Retries only a failed, already-captured seek segment. The original ink
+  /// stays in memory for this editor session and is neither recaptured nor
+  /// persisted by this action.
+  Future<SaberPiSessionState> retryTranscription() async {
+    final current = _state;
+    if (current.phase != SaberPiPhase.ready ||
+        current.error == null ||
+        current.pageId == null ||
+        current.strokeSegmentId == null ||
+        current.ink == null) {
+      throw const SaberPiBridgeException('retry_unavailable');
+    }
+    final turn = ++_turn;
+    _publish(
+      SaberPiSessionState(
+        phase: SaberPiPhase.awakening,
+        pageId: current.pageId,
+        strokeSegmentId: current.strokeSegmentId,
+      ),
+    );
+    onLocalAwakening?.call();
+    return _transcribeCapturedInk(
+      pageId: current.pageId!,
+      strokeSegmentId: current.strokeSegmentId!,
+      png: current.ink!,
+      turn: turn,
+    );
+  }
+
+  Future<SaberPiSessionState> _transcribeCapturedInk({
+    required String pageId,
+    required String strokeSegmentId,
+    required Uint8List png,
+    required int turn,
+  }) async {
+    try {
       final result = await bridge.transcribe(
         pageId: pageId,
         strokeSegmentId: strokeSegmentId,
-        mode: mode,
+        mode: SaberPiMode.seek,
         png: png,
       );
       if (turn != _turn) return _state;
@@ -326,6 +565,42 @@ class SaberPiSession {
     );
   }
 
+  /// Publishes an editable transcription produced from the selected raw ink.
+  /// The PNG is still retained solely for the later, user-confirmed seek.
+  Future<SaberPiSessionState> acceptLocalTranscription({
+    required String pageId,
+    required String strokeSegmentId,
+    required String text,
+    required List<String> candidates,
+    required Future<Uint8List> Function() capturePng,
+  }) async {
+    final normalizedText = text.trim();
+    if (normalizedText.isEmpty || normalizedText.length > 240) {
+      throw const SaberPiBridgeException('invalid_transcription');
+    }
+    final turn = ++_turn;
+    try {
+      final png = await capturePng();
+      if (turn != _turn) return _state;
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.awaitingConfirmation,
+          pageId: pageId,
+          strokeSegmentId: strokeSegmentId,
+          ink: png,
+          transcription: SaberPiTranscription(
+            text: normalizedText,
+            candidates: candidates,
+          ),
+        ),
+      );
+    } on SaberPiBridgeException {
+      rethrow;
+    } on Object {
+      throw const SaberPiBridgeException('png_capture_failed');
+    }
+  }
+
   Future<SaberPiSessionState> confirm(String text) async {
     final current = _state;
     final confirmedText = text.trim();
@@ -339,25 +614,85 @@ class SaberPiSession {
     }
 
     final turn = ++_turn;
-    final result = await bridge.seek(
-      pageId: current.pageId!,
-      strokeSegmentId: current.strokeSegmentId!,
-      png: current.ink!,
-      confirmedText: confirmedText,
+    final transcription = SaberPiTranscription(
+      text: confirmedText,
+      candidates: current.transcription?.candidates ?? const [],
     );
-    if (turn != _turn) return _state;
-    return _publish(
+    if (_journey != null && _journey!.route == null) {
+      return _publish(
+        current.copyWith(
+          phase: SaberPiPhase.ready,
+          transcription: transcription,
+          error: 'route_selection_required',
+        ),
+      );
+    }
+    _publish(
       SaberPiSessionState(
-        phase: SaberPiPhase.ready,
+        phase: SaberPiPhase.seeking,
         pageId: current.pageId,
         strokeSegmentId: current.strokeSegmentId,
         ink: current.ink,
-        result: result,
+        transcription: transcription,
       ),
     );
+    try {
+      final result = await bridge.seek(
+        pageId: current.pageId!,
+        strokeSegmentId: current.strokeSegmentId!,
+        png: current.ink!,
+        confirmedText: confirmedText,
+        journey: _journey?.toJson(),
+      );
+      if (turn != _turn) return _state;
+      if (result.status == 'anchor_ready' && result.anchor != null) {
+        _journey = SaberPiJourneyState.fromAnchor(result.anchor!);
+      } else if (result.status == 'ok' && result.outcome != null) {
+        _journey = _journey?.advance(result.outcome);
+      }
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: current.pageId,
+          strokeSegmentId: current.strokeSegmentId,
+          ink: current.ink,
+          transcription: transcription,
+          result: result,
+          error: saberPiSeekError(result),
+          journey: _journey,
+        ),
+      );
+    } on SaberPiBridgeException catch (error) {
+      if (turn != _turn) return _state;
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: current.pageId,
+          strokeSegmentId: current.strokeSegmentId,
+          ink: current.ink,
+          transcription: transcription,
+          error: error.message,
+        ),
+      );
+    } on Object catch (error) {
+      if (turn != _turn) return _state;
+      return _publish(
+        SaberPiSessionState(
+          phase: SaberPiPhase.ready,
+          pageId: current.pageId,
+          strokeSegmentId: current.strokeSegmentId,
+          ink: current.ink,
+          transcription: transcription,
+          error: error.toString(),
+        ),
+      );
+    }
   }
 
   SaberPiSessionState _publish(SaberPiSessionState state) {
+    if (state.journey == null && _journey != null) {
+      state = state.copyWith(journey: _journey);
+    }
     _state = state;
     onStateChanged?.call(state);
     return state;

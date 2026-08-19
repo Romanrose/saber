@@ -6,11 +6,13 @@ import 'package:saber/i18n/strings.g.dart';
 class SelectionBar extends StatelessWidget {
   final VoidCallback duplicateSelection;
   final VoidCallback deleteSelection;
+  final VoidCallback traceSelection;
 
   const SelectionBar({
     super.key,
     required this.duplicateSelection,
     required this.deleteSelection,
+    required this.traceSelection,
   });
 
   @override
@@ -18,6 +20,19 @@ class SelectionBar extends StatelessWidget {
     return Row(
       mainAxisAlignment: .center,
       children: [
+        IconButton(
+          onPressed: traceSelection,
+          style: TextButton.styleFrom(
+            foregroundColor: ColorScheme.of(context).secondary,
+            backgroundColor: Colors.transparent,
+            shape: const CircleBorder(),
+          ),
+          tooltip: '寻迹此段',
+          icon: const AdaptiveIcon(
+            icon: Icons.auto_stories_outlined,
+            cupertinoIcon: CupertinoIcons.sparkles,
+          ),
+        ),
         IconButton(
           onPressed: duplicateSelection,
           style: TextButton.styleFrom(

@@ -40,6 +40,7 @@ import 'package:saber/data/extensions/matrix4_extensions.dart';
 import 'package:saber/data/file_manager/file_manager.dart';
 import 'package:saber/data/nextcloud/saber_syncer.dart';
 import 'package:saber/data/pi_companion/pi_companion_client.dart';
+import 'package:saber/data/pi_companion/pi_companion_sidecar.dart';
 import 'package:saber/data/prefs.dart';
 import 'package:saber/data/tools/_tool.dart';
 import 'package:saber/data/tools/eraser.dart';
@@ -62,15 +63,53 @@ class _PiInkSegment {
     required this.pageIndex,
     required this.strokeSegmentId,
     required this.bounds,
-  });
+    required List<Stroke> strokes,
+  }) : strokes = List<Stroke>.of(strokes);
 
   final int pageIndex;
   final String strokeSegmentId;
   Rect bounds;
+  final List<Stroke> strokes;
 
   void include(Stroke stroke) {
     bounds = bounds.expandToInclude(stroke.bounds);
+    strokes.add(stroke);
   }
+}
+
+class _PiCompletedAnnotation {
+  const _PiCompletedAnnotation({
+    required this.pageIndex,
+    required this.strokeSegmentId,
+    required this.anchor,
+    required this.state,
+    required this.createdAt,
+    required this.isCollected,
+  });
+
+  final int pageIndex;
+  final String strokeSegmentId;
+  final Rect anchor;
+  final SaberPiSessionState state;
+  final DateTime createdAt;
+  final bool isCollected;
+}
+
+class _PiPanelAnchor {
+  const _PiPanelAnchor({required this.id, required this.bounds});
+
+  final String id;
+  final Rect bounds;
+}
+
+class _PiPanelPlacement {
+  const _PiPanelPlacement({
+    required this.topOffset,
+    required this.placeOnRight,
+  });
+
+  final double topOffset;
+  final bool placeOnRight;
 }
 
 class Editor extends StatefulWidget {
@@ -198,6 +237,38 @@ class EditorState extends State<Editor> {
       if (mounted) setState(() {});
     },
     onStateChanged: (state) {
+      final activeSegment = _piPanelSegment;
+      final outcome = sanitizeSaberPiOutcome(
+        state.result?.outcome,
+        transcription: state.transcription?.text,
+      );
+      final shouldKeepAnnotation =
+          state.phase == SaberPiPhase.ready &&
+          outcome != null &&
+          activeSegment?.strokeSegmentId == state.strokeSegmentId &&
+          !_piCompletedAnnotations.any(
+            (annotation) => annotation.strokeSegmentId == state.strokeSegmentId,
+          );
+      if (shouldKeepAnnotation && activeSegment != null) {
+        _piCompletedAnnotations.add(
+          _PiCompletedAnnotation(
+            pageIndex: activeSegment.pageIndex,
+            strokeSegmentId: activeSegment.strokeSegmentId,
+            anchor: activeSegment.bounds,
+            state: SaberPiSessionState(
+              phase: SaberPiPhase.ready,
+              pageId: state.pageId,
+              strokeSegmentId: state.strokeSegmentId,
+              result: state.result,
+              transcription: state.transcription,
+              journey: state.journey,
+            ),
+            createdAt: DateTime.now().toUtc(),
+            isCollected: false,
+          ),
+        );
+        unawaited(_persistPiCompanionAfterPrimarySave());
+      }
       _piError = state.error;
       if (state.transcription != null) {
         _piConfirmationController.text = state.transcription!.text;
@@ -208,12 +279,23 @@ class EditorState extends State<Editor> {
   final _piConfirmationController = TextEditingController();
   var _piMode = SaberPiMode.seek;
   String? _piError;
+  String? _piRecognitionNotice;
   static const _piSegmentIdleDuration = Duration(milliseconds: 550);
   static const _piCapturePadding = 48.0;
   static const _piMinimumCaptureWidth = 280.0;
   static const _piMinimumCaptureHeight = 200.0;
+  static const _piMaximumCaptureDimension = 1280.0;
   Timer? _piSegmentTimer;
+  Timer? _piStrokeFallbackTimer;
   _PiInkSegment? _pendingPiSegment;
+  _PiInkSegment? _piPanelSegment;
+  final _piObservedStrokes = Set<Stroke>.identity();
+  final _piCompletedAnnotations = <_PiCompletedAnnotation>[];
+  final _piExpandedTraceCards = <String>{};
+  static const _piSidecarStore = SaberPiSidecarStore();
+  var _piSidecarDocument = SaberPiSidecarDocument.empty();
+  var _piSidecarWriteInProgress = false;
+  var _piSidecarWriteQueued = false;
 
   /// The last non-Eraser [currentTool] value.
   late Tool _lastNonEraserTool = Pen.currentPen;
@@ -277,6 +359,12 @@ class EditorState extends State<Editor> {
         }
       }
     }
+
+    for (final page in coreInfo.pages) {
+      _piObservedStrokes.addAll(page.strokes);
+    }
+
+    await _restorePiCompanionSidecar();
 
     if (currentTool == Tool.textEditing) {
       int pageIndex;
@@ -703,6 +791,7 @@ class EditorState extends State<Editor> {
 
         createPage(newStroke.pageIndex);
         page.insertStroke(newStroke);
+        _piObservedStrokes.add(newStroke);
         piPageIndex = dragPageIndex;
         piStroke = newStroke;
         history.recordChange(
@@ -792,8 +881,10 @@ class EditorState extends State<Editor> {
             pageIndex: pageIndex,
             strokeSegmentId: 'segment-${DateTime.now().microsecondsSinceEpoch}',
             bounds: stroke.bounds,
+            strokes: [stroke],
           );
     _pendingPiSegment = segment;
+    _piPanelSegment = segment;
     _piSession.beginSegment(
       pageId: 'page-$pageIndex',
       strokeSegmentId: segment.strokeSegmentId,
@@ -805,6 +896,45 @@ class EditorState extends State<Editor> {
       _pendingPiSegment = null;
       _transcribePiSegment(segment);
     });
+  }
+
+  /// Starts a deliberate trace from the editor's lasso selection. This avoids
+  /// relying on a platform pen-up callback and limits visual OCR to the ink
+  /// the reader explicitly chose.
+  void _tracePiSelection() {
+    final select = currentTool;
+    if (select is! Select ||
+        !select.doneSelecting ||
+        select.selectResult.strokes.isEmpty) {
+      setState(() => _piError = '请先用套索圈选一段手写笔迹。');
+      return;
+    }
+    if (_piMode == SaberPiMode.quiet) {
+      setState(() => _piError = '静读模式只保存笔迹，请切换到寻迹模式。');
+      return;
+    }
+
+    _piSegmentTimer?.cancel();
+    _pendingPiSegment = null;
+    final selectedStrokes = select.selectResult.strokes;
+    final bounds = selectedStrokes
+        .map((stroke) => stroke.bounds)
+        .reduce((value, bounds) => value.expandToInclude(bounds));
+    final segment = _PiInkSegment(
+      pageIndex: select.selectResult.pageIndex,
+      strokeSegmentId: 'selection-${DateTime.now().microsecondsSinceEpoch}',
+      bounds: bounds,
+      strokes: selectedStrokes,
+    );
+    _piPanelSegment = segment;
+    _piError = null;
+    _piRecognitionNotice = null;
+    _piSession.beginSegment(
+      pageId: 'page-${segment.pageIndex}',
+      strokeSegmentId: segment.strokeSegmentId,
+      mode: SaberPiMode.seek,
+    );
+    _transcribePiSegment(segment);
   }
 
   Rect _piCaptureRect(Rect bounds, Size pageSize) {
@@ -827,34 +957,49 @@ class EditorState extends State<Editor> {
 
   void _transcribePiSegment(_PiInkSegment segment) {
     _piError = null;
+    // The on-device ML Kit Chinese model currently returns an unscored first
+    // candidate for some handwriting (for example, unrelated strokes becoming
+    // “李白”). Never promote that candidate to the editable transcription;
+    // send the captured segment through the server-side OCR contract instead.
+    _piRecognitionNotice = '正在用服务端图像识别核验笔迹。';
     unawaited(() async {
       try {
+        Future<Uint8List> capturePng() async {
+          final cropRect = _piCaptureRect(
+            segment.bounds,
+            coreInfo.pages[segment.pageIndex].size,
+          );
+          // Keep the full stroke segment in view, but avoid sending a page-
+          // sized 2K/4K bitmap to the CPU OCR service. This mirrors the PWA
+          // upload bound and changes only the transient provider image; Saber
+          // still retains the original ink at its native page resolution.
+          final pixelRatio = min(
+            1.0,
+            _piMaximumCaptureDimension / max(cropRect.width, cropRect.height),
+          );
+          final image = await EditorExporter.screenshotPage(
+            coreInfo: coreInfo,
+            pageIndex: segment.pageIndex,
+            rasterizeAllStrokes: true,
+            cropRect: cropRect,
+            pixelRatio: pixelRatio,
+          );
+          try {
+            final data = await image.toByteData(format: .png);
+            if (data == null) {
+              throw const SaberPiBridgeException('png_capture_failed');
+            }
+            return data.buffer.asUint8List();
+          } finally {
+            image.dispose();
+          }
+        }
+
         await _piSession.transcribeSegment(
           pageId: 'page-${segment.pageIndex}',
           strokeSegmentId: segment.strokeSegmentId,
           mode: SaberPiMode.seek,
-          capturePng: () async {
-            final cropRect = _piCaptureRect(
-              segment.bounds,
-              coreInfo.pages[segment.pageIndex].size,
-            );
-            final image = await EditorExporter.screenshotPage(
-              coreInfo: coreInfo,
-              pageIndex: segment.pageIndex,
-              rasterizeAllStrokes: true,
-              cropRect: cropRect,
-              pixelRatio: 1,
-            );
-            try {
-              final data = await image.toByteData(format: .png);
-              if (data == null) {
-                throw const SaberPiBridgeException('png_capture_failed');
-              }
-              return data.buffer.asUint8List();
-            } finally {
-              image.dispose();
-            }
-          },
+          capturePng: capturePng,
         );
       } on SaberPiBridgeException catch (error) {
         if (mounted) setState(() => _piError = error.message);
@@ -872,6 +1017,10 @@ class EditorState extends State<Editor> {
     setState(() => _piMode = mode);
   }
 
+  void _onPiJourneyRouteSelected(String route) {
+    _piSession.selectJourneyRoute(route);
+  }
+
   void _confirmPiTranscription() {
     _piError = null;
     unawaited(() async {
@@ -885,11 +1034,177 @@ class EditorState extends State<Editor> {
     }());
   }
 
+  void _usePiTranscriptionCandidate(String candidate) {
+    _piConfirmationController.value = TextEditingValue(
+      text: candidate,
+      selection: TextSelection.collapsed(offset: candidate.length),
+    );
+    if (mounted) setState(() {});
+  }
+
+  void _retryPiTranscription() {
+    _piError = null;
+    unawaited(() async {
+      try {
+        await _piSession.retryTranscription();
+      } on SaberPiBridgeException catch (error) {
+        if (mounted) setState(() => _piError = error.message);
+      } on Object catch (error) {
+        if (mounted) setState(() => _piError = error.toString());
+      }
+    }());
+  }
+
+  SaberPiSidecarAnchor _normalizePiAnchor(Rect anchor, Size pageSize) {
+    if (pageSize.width <= 0 || pageSize.height <= 0) {
+      throw StateError('invalid_pi_sidecar_page_size');
+    }
+    final left = (anchor.left / pageSize.width).clamp(0.0, 1.0).toDouble();
+    final top = (anchor.top / pageSize.height).clamp(0.0, 1.0).toDouble();
+    final right = (anchor.right / pageSize.width).clamp(left, 1.0).toDouble();
+    final bottom = (anchor.bottom / pageSize.height).clamp(top, 1.0).toDouble();
+    return SaberPiSidecarAnchor(
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
+    );
+  }
+
+  Rect _restorePiAnchor(SaberPiSidecarAnchor anchor, Size pageSize) =>
+      Rect.fromLTWH(
+        anchor.x * pageSize.width,
+        anchor.y * pageSize.height,
+        anchor.width * pageSize.width,
+        anchor.height * pageSize.height,
+      );
+
+  Future<void> _restorePiCompanionSidecar() async {
+    final noteFile = FileManager.getFile(coreInfo.filePath + Editor.extension);
+    final restored = await _piSidecarStore.readForNote(noteFile);
+    if (restored == null) return;
+    _piSidecarDocument = restored;
+    for (final annotation in restored.annotations) {
+      if (annotation.pageIndex >= coreInfo.pages.length ||
+          _piCompletedAnnotations.any(
+            (current) => current.strokeSegmentId == annotation.strokeSegmentId,
+          )) {
+        continue;
+      }
+      final page = coreInfo.pages[annotation.pageIndex];
+      _piCompletedAnnotations.add(
+        _PiCompletedAnnotation(
+          pageIndex: annotation.pageIndex,
+          strokeSegmentId: annotation.strokeSegmentId,
+          anchor: _restorePiAnchor(annotation.anchor, page.size),
+          state: SaberPiSessionState(
+            phase: SaberPiPhase.ready,
+            pageId: 'page-${annotation.pageIndex}',
+            strokeSegmentId: annotation.strokeSegmentId,
+            result: SaberPiBridgeResult(
+              status: 'ok',
+              stage: 'annotation',
+              originalInkRetained: true,
+              outcome: annotation.outcome,
+            ),
+          ),
+          createdAt: DateTime.parse(annotation.createdAt).toUtc(),
+          isCollected: annotation.isCollected,
+        ),
+      );
+    }
+  }
+
+  Future<void> _persistPiCompanionAfterPrimarySave() async {
+    if (coreInfo.readOnly) return;
+    _piSidecarWriteQueued = true;
+    if (_piSidecarWriteInProgress) return;
+    _piSidecarWriteInProgress = true;
+    try {
+      while (_piSidecarWriteQueued) {
+        _piSidecarWriteQueued = false;
+        final deadline = DateTime.now().add(const Duration(seconds: 10));
+        while (savingState.value == SavingState.saving &&
+            DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+        if (savingState.value != SavingState.saved ||
+            !history.isCurrentStateSaved) {
+          await saveToFile();
+        }
+        if (savingState.value != SavingState.saved ||
+            !history.isCurrentStateSaved) {
+          log.warning(
+            'Skipping Pi companion sidecar until Saber note is saved',
+          );
+          continue;
+        }
+        final annotations = <SaberPiSidecarAnnotation>[];
+        for (final annotation in _piCompletedAnnotations) {
+          final outcome = sanitizeSaberPiOutcome(
+            annotation.state.result?.outcome,
+            transcription: annotation.state.transcription?.text,
+          );
+          if (outcome == null ||
+              annotation.pageIndex >= coreInfo.pages.length) {
+            continue;
+          }
+          annotations.add(
+            SaberPiSidecarAnnotation(
+              id: 'annotation-${annotation.strokeSegmentId}',
+              pageIndex: annotation.pageIndex,
+              strokeSegmentId: annotation.strokeSegmentId,
+              anchor: _normalizePiAnchor(
+                annotation.anchor,
+                coreInfo.pages[annotation.pageIndex].size,
+              ),
+              outcome: outcome,
+              createdAt: annotation.createdAt.toIso8601String(),
+              isCollected: annotation.isCollected,
+            ),
+          );
+        }
+        final document = _piSidecarDocument.copyWith(annotations: annotations);
+        final noteFile = FileManager.getFile(
+          coreInfo.filePath + Editor.extension,
+        );
+        await _piSidecarStore.writeForNote(noteFile, document);
+        _piSidecarDocument = document;
+      }
+    } on Object catch (error, stackTrace) {
+      // The source note and original strokes have already been saved by Saber.
+      // Sidecar persistence must never make the editor appear to lose ink.
+      log.warning('Could not persist Pi companion sidecar', error, stackTrace);
+    } finally {
+      _piSidecarWriteInProgress = false;
+    }
+  }
+
   void onInteractionEnd(ScaleEndDetails details) {
     // reset after 1ms to keep track of the same gesture only
     _lastSeenPointerCountTimer?.cancel();
     _lastSeenPointerCountTimer = Timer(const Duration(milliseconds: 10), () {
       lastSeenPointerCount = 0;
+    });
+    _schedulePiStrokeFallback();
+  }
+
+  /// Some tablet pen layers commit their stroke after the gesture callback.
+  /// The regular onDrawEnd path remains immediate; this only observes a newly
+  /// inserted stroke that did not pass through that path.
+  void _schedulePiStrokeFallback() {
+    _piStrokeFallbackTimer?.cancel();
+    _piStrokeFallbackTimer = Timer(const Duration(milliseconds: 150), () {
+      if (!mounted || _piMode != SaberPiMode.seek) return;
+      for (var pageIndex = 0; pageIndex < coreInfo.pages.length; pageIndex++) {
+        final unseen = <Stroke>[];
+        for (final stroke in coreInfo.pages[pageIndex].strokes) {
+          if (_piObservedStrokes.add(stroke)) unseen.add(stroke);
+        }
+        for (final stroke in unseen) {
+          _queuePiCompanionStroke(pageIndex, stroke);
+        }
+      }
     });
   }
 
@@ -1644,6 +1959,7 @@ class EditorState extends State<Editor> {
               autosaveAfterDelay();
             });
           },
+          traceSelection: _tracePiSelection,
           deleteSelection: () {
             final select = currentTool as Select;
             if (!select.doneSelecting) {
@@ -1750,22 +2066,7 @@ class EditorState extends State<Editor> {
     );
 
     final Widget body;
-    final canvasWithPiPanel = Stack(
-      children: [
-        Positioned.fill(child: canvas),
-        Align(
-          alignment: Alignment.centerRight,
-          child: PiCompanionPanel(
-            mode: _piMode,
-            state: _piSession.state,
-            confirmationController: _piConfirmationController,
-            error: _piError,
-            onModeChanged: _onPiModeChanged,
-            onConfirm: _confirmPiTranscription,
-          ),
-        ),
-      ],
-    );
+    final canvasWithPiPanel = canvas;
     if (isToolbarVertical) {
       body = Row(
         textDirection: stows.editorToolbarAlignment.value == AxisDirection.left
@@ -2007,6 +2308,30 @@ class EditorState extends State<Editor> {
 
   Widget pageBuilder(BuildContext context, int pageIndex) {
     final page = coreInfo.pages[pageIndex];
+    final completedAnnotations = _piCompletedAnnotations
+        .where((annotation) => annotation.pageIndex == pageIndex)
+        .toList(growable: false);
+    final showsCurrentPanel =
+        pageIndex == (_piPanelSegment?.pageIndex ?? currentPageIndex);
+    final currentAlreadyCompleted = _piCompletedAnnotations.any(
+      (annotation) =>
+          annotation.strokeSegmentId == _piSession.state.strokeSegmentId,
+    );
+    final panelAnchors = <_PiPanelAnchor>[
+      for (final annotation in completedAnnotations)
+        _PiPanelAnchor(
+          id: annotation.strokeSegmentId,
+          bounds: annotation.anchor,
+        ),
+      if (showsCurrentPanel)
+        _PiPanelAnchor(
+          id: 'current-${_piSession.state.strokeSegmentId ?? 'rest'}',
+          bounds:
+              _piPanelSegment?.bounds ??
+              Rect.fromLTWH(page.size.width - 48, 18, 0, 0),
+        ),
+    ];
+    final panelTopOffsets = _piPanelTopOffsets(panelAnchors, page.size);
     final currentStroke = Pen.currentStroke?.pageIndex == pageIndex
         ? Pen.currentStroke
         : null;
@@ -2043,7 +2368,129 @@ class EditorState extends State<Editor> {
       },
       currentTool: currentTool,
       currentScale: _transformationController.value.approxScale,
+      annotationOverlay: completedAnnotations.isNotEmpty || showsCurrentPanel
+          ? Stack(
+              children: [
+                for (final annotation in completedAnnotations)
+                  PiCompanionPanel(
+                    mode: SaberPiMode.seek,
+                    state: annotation.state,
+                    anchor: annotation.anchor,
+                    confirmationController: _piConfirmationController,
+                    error: null,
+                    onModeChanged: _onPiModeChanged,
+                    onConfirm: _confirmPiTranscription,
+                    onJourneyRouteSelected: _onPiJourneyRouteSelected,
+                    onToggleTraceCard: () {
+                      setState(() {
+                        if (_piExpandedTraceCards.contains(
+                          annotation.strokeSegmentId,
+                        )) {
+                          _piExpandedTraceCards.remove(
+                            annotation.strokeSegmentId,
+                          );
+                        } else {
+                          _piExpandedTraceCards.add(annotation.strokeSegmentId);
+                        }
+                      });
+                    },
+                    traceCardExpanded: _piExpandedTraceCards.contains(
+                      annotation.strokeSegmentId,
+                    ),
+                    showModeControl: false,
+                    animateOutcome: false,
+                    topOffset:
+                        panelTopOffsets[annotation.strokeSegmentId]
+                            ?.topOffset ??
+                        0,
+                    placeOnRight: panelTopOffsets[annotation.strokeSegmentId]
+                        ?.placeOnRight,
+                  ),
+                if (showsCurrentPanel)
+                  PiCompanionPanel(
+                    mode: _piMode,
+                    state: _piSession.state,
+                    anchor:
+                        _piPanelSegment?.bounds ??
+                        Rect.fromLTWH(page.size.width - 48, 18, 0, 0),
+                    confirmationController: _piConfirmationController,
+                    error: _piError,
+                    notice: _piRecognitionNotice,
+                    onModeChanged: _onPiModeChanged,
+                    onConfirm: _confirmPiTranscription,
+                    onJourneyRouteSelected: _onPiJourneyRouteSelected,
+                    onCandidate: _usePiTranscriptionCandidate,
+                    onRetry: _retryPiTranscription,
+                    onToggleTraceCard: () {
+                      final id = _piSession.state.strokeSegmentId;
+                      if (id == null) return;
+                      setState(() {
+                        if (_piExpandedTraceCards.contains(id)) {
+                          _piExpandedTraceCards.remove(id);
+                        } else {
+                          _piExpandedTraceCards.add(id);
+                        }
+                      });
+                    },
+                    traceCardExpanded: _piExpandedTraceCards.contains(
+                      _piSession.state.strokeSegmentId,
+                    ),
+                    showOutcome: !currentAlreadyCompleted,
+                    topOffset:
+                        panelTopOffsets['current-${_piSession.state.strokeSegmentId ?? 'rest'}']
+                            ?.topOffset ??
+                        0,
+                    placeOnRight:
+                        panelTopOffsets['current-${_piSession.state.strokeSegmentId ?? 'rest'}']
+                            ?.placeOnRight,
+                  ),
+              ],
+            )
+          : null,
     );
+  }
+
+  Map<String, _PiPanelPlacement> _piPanelTopOffsets(
+    List<_PiPanelAnchor> anchors,
+    Size pageSize,
+  ) {
+    const edge = 18.0;
+    const gap = 16.0;
+    const preferredWidth = 280.0;
+    const reservedHeight = 240.0;
+    const laneGap = 12.0;
+    final maximumTop = max(edge, pageSize.height - edge - reservedHeight);
+    final panelWidth = min(preferredWidth, max(0.0, pageSize.width - 2 * edge));
+    final nextTopByRightLane = <bool, double>{true: edge, false: edge};
+    final placements = <String, _PiPanelPlacement>{};
+
+    final orderedAnchors = anchors.toList()
+      ..sort((left, right) {
+        final byTop = left.bounds.top.compareTo(right.bounds.top);
+        return byTop != 0 ? byTop : left.id.compareTo(right.id);
+      });
+    for (final anchor in orderedAnchors) {
+      final rightFits =
+          anchor.bounds.right + gap + panelWidth <= pageSize.width - edge;
+      var placeOnRight = rightFits;
+      final desiredTop = anchor.bounds.top.clamp(edge, maximumTop).toDouble();
+      if (placeOnRight &&
+          nextTopByRightLane[true]! > maximumTop &&
+          nextTopByRightLane[false]! <= maximumTop) {
+        placeOnRight = false;
+      }
+      final laneTop = nextTopByRightLane[placeOnRight]!;
+      final placedTop = max(
+        desiredTop,
+        laneTop,
+      ).clamp(edge, maximumTop).toDouble();
+      placements[anchor.id] = _PiPanelPlacement(
+        topOffset: placedTop - anchor.bounds.top,
+        placeOnRight: placeOnRight,
+      );
+      nextTopByRightLane[placeOnRight] = placedTop + reservedHeight + laneGap;
+    }
+    return placements;
   }
 
   Widget pageManager(BuildContext context) {
@@ -2247,6 +2694,7 @@ class EditorState extends State<Editor> {
     _watchServerTimer?.cancel();
     _lastSeenPointerCountTimer?.cancel();
     _piSegmentTimer?.cancel();
+    _piStrokeFallbackTimer?.cancel();
     _piConfirmationController.dispose();
     _piBridge.close();
 
